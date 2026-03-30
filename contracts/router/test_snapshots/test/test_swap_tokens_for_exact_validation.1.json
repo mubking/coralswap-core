@@ -148,27 +148,15 @@
                 "bytes": "0000000000000000000000000000000000000000000000000000000000000001"
               },
               {
-                "symbol": "remove_liquidity"
+                "symbol": "swap_tokens_for_exact_tokens"
               }
             ],
             "data": {
               "vec": [
                 {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
-                },
-                {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
-                },
-                {
                   "i128": {
                     "hi": 0,
-                    "lo": 100
-                  }
-                },
-                {
-                  "i128": {
-                    "hi": 0,
-                    "lo": 500
+                    "lo": 900
                   }
                 },
                 {
@@ -178,10 +166,20 @@
                   }
                 },
                 {
+                  "vec": [
+                    {
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                    },
+                    {
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                    }
+                  ]
+                },
+                {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
                 },
                 {
-                  "u64": 1000
+                  "u64": 1900
                 }
               ]
             }
@@ -199,16 +197,43 @@
           "v0": {
             "topics": [
               {
-                "symbol": "fn_return"
-              },
-              {
-                "symbol": "remove_liquidity"
+                "symbol": "log"
               }
             ],
             "data": {
-              "error": {
-                "contract": 300
-              }
+              "vec": [
+                {
+                  "string": "caught panic 'not yet implemented' from contract function 'Symbol(obj#27)'"
+                },
+                {
+                  "i128": {
+                    "hi": 0,
+                    "lo": 900
+                  }
+                },
+                {
+                  "i128": {
+                    "hi": 0,
+                    "lo": 1000
+                  }
+                },
+                {
+                  "vec": [
+                    {
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                    },
+                    {
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                    }
+                  ]
+                },
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
+                },
+                {
+                  "u64": 1900
+                }
+              ]
             }
           }
         }
@@ -228,12 +253,12 @@
               },
               {
                 "error": {
-                  "contract": 300
+                  "wasm_vm": "invalid_action"
                 }
               }
             ],
             "data": {
-              "string": "escalating Ok(ScErrorType::Contract) frame-exit to Err"
+              "string": "caught error from function"
             }
           }
         }
@@ -253,7 +278,7 @@
               },
               {
                 "error": {
-                  "contract": 300
+                  "wasm_vm": "invalid_action"
                 }
               }
             ],
@@ -263,26 +288,14 @@
                   "string": "contract try_call failed"
                 },
                 {
-                  "symbol": "remove_liquidity"
+                  "symbol": "swap_tokens_for_exact_tokens"
                 },
                 {
                   "vec": [
                     {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
-                    },
-                    {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
-                    },
-                    {
                       "i128": {
                         "hi": 0,
-                        "lo": 100
-                      }
-                    },
-                    {
-                      "i128": {
-                        "hi": 0,
-                        "lo": 500
+                        "lo": 900
                       }
                     },
                     {
@@ -292,10 +305,20 @@
                       }
                     },
                     {
+                      "vec": [
+                        {
+                          "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                        },
+                        {
+                          "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                        }
+                      ]
+                    },
+                    {
                       "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
                     },
                     {
-                      "u64": 1000
+                      "u64": 1900
                     }
                   ]
                 }
