@@ -14,4 +14,5 @@ pub enum RouterError {
     InsufficientLiquidity = 307,
     SlippageExceeded = 308,
     InternalError = 309,
+    TransactionExpired = 310,
 }

@@ -26,6 +26,12 @@ use storage::{
     ReentrancyGuard,
 };
 
+#[contractclient(name = "FactoryClient")]
+pub trait FactoryInterface {
+    fn get_fee_bps(env: Env) -> u32;
+    fn fee_to(env: Env) -> Option<Address>;
+}
+
 #[contractclient(name = "LpTokenClient")]
 pub trait LpTokenInterface {
     fn mint(env: Env, to: Address, amount: i128);
@@ -70,6 +76,8 @@ impl Pair {
             price_a_cumulative: 0,
             price_b_cumulative: 0,
             k_last: 0,
+            protocol_fees_owed_a: 0,
+            protocol_fees_owed_b: 0,
         };
 
         set_pair_state(&env, &state);
@@ -286,6 +294,45 @@ impl Pair {
         Ok(())
     }
 
+    // ─────────────────────────────────────────
+    // Collect Protocol Fees
+    // ─────────────────────────────────────────
+
+    /// Transfers accumulated protocol fees to the factory's fee_to address.
+    pub fn collect_fees(env: Env) -> Result<(i128, i128), PairError> {
+        let mut state = get_pair_state(&env).ok_or(PairError::NotInitialized)?;
+        let contract = env.current_contract_address();
+
+        // Determine where to send fees: query the factory's fee_to address
+        let factory_client = FactoryClient::new(&env, &state.factory);
+        let fee_to = factory_client.fee_to();
+
+        let amount_0 = state.protocol_fees_owed_a;
+        let amount_1 = state.protocol_fees_owed_b;
+
+        if amount_0 > 0 {
+            if let Some(ref to) = fee_to {
+                TokenClient::new(&env, &state.token_a).transfer(&contract, to, &amount_0);
+            }
+        }
+        if amount_1 > 0 {
+            if let Some(ref to) = fee_to {
+                TokenClient::new(&env, &state.token_b).transfer(&contract, to, &amount_1);
+            }
+        }
+
+        state.protocol_fees_owed_a = 0;
+        state.protocol_fees_owed_b = 0;
+        state.reserve_a = state.reserve_a.checked_sub(amount_0).ok_or(PairError::Overflow)?;
+        state.reserve_b = state.reserve_b.checked_sub(amount_1).ok_or(PairError::Overflow)?;
+
+        set_pair_state(&env, &state);
+
+        PairEvents::collect_fees(&env, amount_0, amount_1);
+
+        Ok((amount_0, amount_1))
+    }
+
     fn swap_inner(
         env: &Env,
         amount_a_out: i128,
@@ -357,6 +404,40 @@ impl Pair {
 
         if k_after < k_before {
             return Err(PairError::InvalidK);
+        }
+
+        // --- Accumulate protocol fees ---
+        // Query the factory's protocol fee bps. If the factory isn't deployed
+        // (e.g. in unit tests), the call fails silently and no fees are accrued.
+        // If the factory isn't deployed (e.g. unit tests), default to 0.
+        let factory_fee_bps = match env.try_invoke_contract::<u32, soroban_sdk::Error>(
+            &pair.factory,
+            &soroban_sdk::Symbol::new(env, "get_fee_bps"),
+            soroban_sdk::Vec::new(env),
+        ) {
+            Ok(Ok(bps)) => bps,
+            _ => 0u32,
+        };
+
+        if factory_fee_bps > 0 {
+            let protocol_fee_a = amount_a_in
+                .checked_mul(factory_fee_bps as i128)
+                .ok_or(PairError::Overflow)?
+                .checked_div(10_000)
+                .ok_or(PairError::Overflow)?;
+            let protocol_fee_b = amount_b_in
+                .checked_mul(factory_fee_bps as i128)
+                .ok_or(PairError::Overflow)?
+                .checked_div(10_000)
+                .ok_or(PairError::Overflow)?;
+            pair.protocol_fees_owed_a = pair
+                .protocol_fees_owed_a
+                .checked_add(protocol_fee_a)
+                .ok_or(PairError::Overflow)?;
+            pair.protocol_fees_owed_b = pair
+                .protocol_fees_owed_b
+                .checked_add(protocol_fee_b)
+                .ok_or(PairError::Overflow)?;
         }
 
         pair.reserve_a = balance_a;

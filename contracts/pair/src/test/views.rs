@@ -104,6 +104,8 @@ fn test_get_reserves_after_state_change() {
         price_a_cumulative: 0,
         price_b_cumulative: 0,
         k_last: 2000000,
+        protocol_fees_owed_a: 0,
+        protocol_fees_owed_b: 0,
     };
 
     // Hack: use env to invoke bare function or just use pair_client which invokes `Pair` under the hood.

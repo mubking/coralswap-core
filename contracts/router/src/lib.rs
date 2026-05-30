@@ -11,7 +11,7 @@ mod storage;
 mod test;
 
 use errors::RouterError;
-use helpers::{compute_optimal_amounts, get_pair_address, PairClient};
+use helpers::{compute_optimal_amounts, get_amount_in, get_amount_out, get_pair_address, sort_tokens, PairClient};
 use soroban_sdk::{contract, contractimpl, token::TokenClient, Address, Env, Vec};
 use storage::{get_factory, set_factory};
 
@@ -24,33 +24,170 @@ impl Router {
         set_factory(&env, &factory);
     }
     pub fn swap_exact_tokens_for_tokens(
-        _env: Env,
-        _amount_in: i128,
-        _amount_out_min: i128,
-        _path: Vec<Address>,
-        _to: Address,
-        _deadline: u64,
+        env: Env,
+        amount_in: i128,
+        amount_out_min: i128,
+        path: Vec<Address>,
+        to: Address,
+        deadline: u64,
     ) -> Result<Vec<i128>, RouterError> {
-        todo!()
+        // Check deadline (ledger sequence)
+        if env.ledger().sequence() > deadline as u32 {
+            return Err(RouterError::TransactionExpired);
+        }
+
+        if amount_in <= 0 {
+            return Err(RouterError::ZeroAmount);
+        }
+
+        if path.len() < 2 {
+            return Err(RouterError::InvalidPath);
+        }
+
+        let factory = get_factory(&env).ok_or(RouterError::PairNotFound)?;
+        let mut amounts = Vec::new(&env);
+        amounts.push_back(amount_in);
+
+        for i in 0..path.len() - 1 {
+            let token_in = path.get(i).unwrap();
+            let token_out = path.get(i + 1).unwrap();
+
+            let pair_address = get_pair_address(&env, &factory, &token_in, &token_out)?;
+            let pair_client = PairClient::new(&env, &pair_address);
+            let (reserve_a, reserve_b, _) = pair_client.get_reserves();
+            let fee_bps = pair_client.get_current_fee_bps();
+
+            let (reserve_in, reserve_out) =
+                if token_in < token_out { (reserve_a, reserve_b) } else { (reserve_b, reserve_a) };
+
+            let amount_out = get_amount_out(&env, amounts.get(i).unwrap(), reserve_in, reserve_out, fee_bps)?;
+            amounts.push_back(amount_out);
+
+            if i == path.len() - 2 {
+                // Last hop — output must meet minimum
+                if amount_out < amount_out_min {
+                    return Err(RouterError::SlippageExceeded);
+                }
+
+                // Determine (amount_a_out, amount_b_out) based on pair canonical ordering
+                let (sorted_a, _) = sort_tokens(&token_in, &token_out)?;
+                let (amount_a_out, amount_b_out) = if token_in == sorted_a {
+                    (0i128, amount_out)
+                } else {
+                    (amount_out, 0i128)
+                };
+
+                // Transfer input tokens from user to the pair
+                let amount_in_this_hop = amounts.get(i).unwrap();
+                to.require_auth();
+                TokenClient::new(&env, &token_in).transfer(&to, &pair_address, &amount_in_this_hop);
+
+                pair_client.swap(&amount_a_out, &amount_b_out, &to);
+            } else {
+                // Intermediate hop: transfer to the next pair, the output goes to the next pair
+                // For simplicity in single-hop paths this won't be reached
+                let amount_in_this_hop = amounts.get(i).unwrap();
+                to.require_auth();
+                TokenClient::new(&env, &token_in).transfer(&to, &pair_address, &amount_in_this_hop);
+
+                let next_pair_address =
+                    get_pair_address(&env, &factory, &token_out, &path.get(i + 2).unwrap())?;
+
+                let (sorted_a, _) = sort_tokens(&token_in, &token_out)?;
+                let (amount_a_out, amount_b_out) = if token_in == sorted_a {
+                    (0i128, amount_out)
+                } else {
+                    (amount_out, 0i128)
+                };
+
+                pair_client.swap(&amount_a_out, &amount_b_out, &next_pair_address);
+            }
+        }
+
+        Ok(amounts)
     }
 
-    /// Swaps tokens to receive an exact amount of output tokens (not yet implemented).
-    ///
-    /// # Arguments
-    /// * `amount_out` - The exact amount of output tokens desired
-    /// * `amount_in_max` - The maximum amount of input tokens to spend
-    /// * `path` - Vector of token addresses representing the swap route
-    /// * `to` - The recipient address for output tokens
-    /// * `deadline` - Unix timestamp after which the transaction will revert
+    /// Swaps tokens to receive an exact amount of output tokens.
     pub fn swap_tokens_for_exact_tokens(
-        _env: Env,
-        _amount_out: i128,
-        _amount_in_max: i128,
-        _path: Vec<Address>,
-        _to: Address,
-        _deadline: u64,
+        env: Env,
+        amount_out: i128,
+        amount_in_max: i128,
+        path: Vec<Address>,
+        to: Address,
+        deadline: u64,
     ) -> Result<Vec<i128>, RouterError> {
-        todo!()
+        // Check deadline (ledger sequence)
+        if env.ledger().sequence() > deadline as u32 {
+            return Err(RouterError::TransactionExpired);
+        }
+
+        if amount_out <= 0 {
+            return Err(RouterError::ZeroAmount);
+        }
+
+        if path.len() < 2 {
+            return Err(RouterError::InvalidPath);
+        }
+
+        let factory = get_factory(&env).ok_or(RouterError::PairNotFound)?;
+
+        // Compute required input amounts backwards through the path
+        let mut amounts = Vec::new(&env);
+        amounts.push_back(amount_out);
+
+        for i in (0..path.len() - 1).rev() {
+            let token_in = path.get(i).unwrap();
+            let token_out = path.get(i + 1).unwrap();
+
+            let pair_address = get_pair_address(&env, &factory, &token_in, &token_out)?;
+            let pair_client = PairClient::new(&env, &pair_address);
+            let (reserve_a, reserve_b, _) = pair_client.get_reserves();
+            let fee_bps = pair_client.get_current_fee_bps();
+
+            let (reserve_in, reserve_out) =
+                if token_in < token_out { (reserve_a, reserve_b) } else { (reserve_b, reserve_a) };
+
+            let amount_in =
+                get_amount_in(&env, amounts.get(0).unwrap(), reserve_in, reserve_out, fee_bps)?;
+            amounts.insert(0, amount_in);
+        }
+
+        let total_amount_in = amounts.get(0).unwrap();
+        if total_amount_in > amount_in_max {
+            return Err(RouterError::ExcessiveInputAmount);
+        }
+
+        // Execute swaps forward
+        to.require_auth();
+
+        for i in 0..path.len() - 1 {
+            let token_in = path.get(i).unwrap();
+            let token_out = path.get(i + 1).unwrap();
+            let amount_in_this = amounts.get(i).unwrap();
+            let amount_out_this = amounts.get(i + 1).unwrap();
+
+            let pair_address = get_pair_address(&env, &factory, &token_in, &token_out)?;
+            let pair_client = PairClient::new(&env, &pair_address);
+
+            TokenClient::new(&env, &token_in).transfer(&to, &pair_address, &amount_in_this);
+
+            let recipient = if i == path.len() - 2 {
+                to.clone()
+            } else {
+                get_pair_address(&env, &factory, &token_out, &path.get(i + 2).unwrap())?
+            };
+
+            let (sorted_a, _) = sort_tokens(&token_in, &token_out)?;
+            let (amount_a_out, amount_b_out) = if token_in == sorted_a {
+                (0i128, amount_out_this)
+            } else {
+                (amount_out_this, 0i128)
+            };
+
+            pair_client.swap(&amount_a_out, &amount_b_out, &recipient);
+        }
+
+        Ok(amounts)
     }
 
     /// Adds liquidity to a token pair (not yet implemented).

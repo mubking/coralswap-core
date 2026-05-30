@@ -49,4 +49,17 @@ impl FactoryEvents {
             (old_fee_bps, new_fee_bps, fee_to.clone()),
         );
     }
+
+    pub fn protocol_fees_collected(
+        env: &Env,
+        pair: &Address,
+        amount_0: i128,
+        amount_1: i128,
+        ledger: u32,
+    ) {
+        env.events().publish(
+            (soroban_sdk::symbol_short!("proto_cl"), pair.clone()),
+            (amount_0, amount_1, ledger),
+        );
+    }
 }

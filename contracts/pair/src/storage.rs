@@ -13,6 +13,8 @@ pub struct PairStorage {
     pub price_a_cumulative: i128,
     pub price_b_cumulative: i128,
     pub k_last: i128,
+    pub protocol_fees_owed_a: i128,
+    pub protocol_fees_owed_b: i128,
 }
 
 #[contracttype]

@@ -222,6 +222,28 @@
                             },
                             {
                               "key": {
+                                "symbol": "protocol_fees_owed_a"
+                              },
+                              "val": {
+                                "i128": {
+                                  "hi": 0,
+                                  "lo": 0
+                                }
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "protocol_fees_owed_b"
+                              },
+                              "val": {
+                                "i128": {
+                                  "hi": 0,
+                                  "lo": 0
+                                }
+                              }
+                            },
+                            {
+                              "key": {
                                 "symbol": "reserve_a"
                               },
                               "val": {

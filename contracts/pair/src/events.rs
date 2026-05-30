@@ -38,6 +38,13 @@ impl PairEvents {
         env.events().publish((symbol_short!("sync"),), (reserve_a, reserve_b));
     }
 
+    pub fn collect_fees(env: &Env, amount_0: i128, amount_1: i128) {
+        env.events().publish(
+            (symbol_short!("col_fees"),),
+            (amount_0, amount_1),
+        );
+    }
+
     // Emits a `flash_loan` event after a successful flash loan.
 
     // Topics: `("pair", "flash_loan")`

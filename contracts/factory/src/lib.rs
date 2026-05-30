@@ -26,6 +26,7 @@ pub trait PairInterface {
         token_b: Address,
         lp_token: Address,
     ) -> Result<(), FactoryError>;
+    fn collect_fees(env: Env) -> (i128, i128);
 }
 
 #[contract]
@@ -253,6 +254,33 @@ impl Factory {
         Ok(())
     }
 
+    /// Collects protocol fees from a batch of pairs and transfers them to fee_to.
+    /// Only callable by the fee_to address itself.
+    pub fn collect_protocol_fees(
+        env: Env,
+        pairs: Vec<Address>,
+    ) -> Result<(), FactoryError> {
+        let storage = storage::get_factory_storage(&env).ok_or(FactoryError::NotInitialized)?;
+        let fee_to = storage.fee_to.ok_or(FactoryError::Unauthorized)?;
+
+        // Require the fee_to to authorize this call
+        fee_to.require_auth();
+
+        for pair_addr in pairs.iter() {
+            let pair_client = PairClient::new(&env, &pair_addr);
+            let (amount_0, amount_1) = pair_client.collect_fees();
+            events::FactoryEvents::protocol_fees_collected(
+                &env,
+                &pair_addr,
+                amount_0,
+                amount_1,
+                env.ledger().sequence(),
+            );
+        }
+
+        Ok(())
+    }
+
     pub fn set_fee_to_setter(
         env: Env,
         setter: Address,
@@ -276,6 +304,10 @@ impl Factory {
 
     pub fn fee_to(env: Env) -> Option<Address> {
         storage::get_factory_storage(&env).map(|s| s.fee_to).unwrap_or(None)
+    }
+
+    pub fn get_fee_bps(env: Env) -> u32 {
+        storage::get_factory_storage(&env).map(|s| s.fee_bps).unwrap_or(0)
     }
 
     pub fn fee_to_setter(env: Env) -> Option<Address> {
