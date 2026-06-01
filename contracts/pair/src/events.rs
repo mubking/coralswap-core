@@ -49,6 +49,19 @@ impl PairEvents {
     ///
     /// "flash_loan" = 10 chars → exceeds the 9-char symbol_short! limit,
     /// so we use Symbol::new for a runtime allocation.
+    pub fn burn_single_side(
+        env: &Env,
+        to: &Address,
+        lp_amount: i128,
+        preferred_token: &Address,
+        total_out: i128,
+    ) {
+        env.events().publish(
+            (symbol_short!("burn_ss"), to.clone()),
+            (lp_amount, preferred_token.clone(), total_out),
+        );
+    }
+
     #[allow(dead_code)]
     pub fn flash_loan(
         env: &Env,

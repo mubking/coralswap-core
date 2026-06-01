@@ -20,7 +20,7 @@ use dynamic_fee::compute_fee_bps;
 use errors::PairError;
 use events::PairEvents;
 use math::MINIMUM_LIQUIDITY;
-use soroban_sdk::{contract, contractclient, contractimpl, token::TokenClient, Address, Env};
+use soroban_sdk::{contract, contractclient, contractimpl, token::TokenClient, Address, Bytes, Env};
 use storage::{
     get_fee_state, get_pair_state, set_fee_state, set_pair_state, set_reentrancy_guard, FeeState,
     ReentrancyGuard,
@@ -220,6 +220,164 @@ impl Pair {
     }
 
     // ─────────────────────────────────────────
+    // Burn single-side
+    // ─────────────────────────────────────────
+
+    pub fn burn_single_side(
+        env: Env,
+        to: Address,
+        lp_amount: i128,
+        preferred_token: Address,
+        min_amount_out: i128,
+    ) -> Result<i128, PairError> {
+        to.require_auth();
+
+        let _guard = reentrancy::ReentrancyGuard::acquire(&env)?;
+
+        let mut state = get_pair_state(&env).ok_or(PairError::NotInitialized)?;
+        let fee_state = get_fee_state(&env).ok_or(PairError::NotInitialized)?;
+
+        if lp_amount <= 0 || min_amount_out <= 0 {
+            return Err(PairError::InvalidInput);
+        }
+
+        let prefer_a = if preferred_token == state.token_a {
+            true
+        } else if preferred_token == state.token_b {
+            false
+        } else {
+            return Err(PairError::InvalidInput);
+        };
+
+        let lp_client = LpTokenClient::new(&env, &state.lp_token);
+        let total_supply = lp_client.total_supply();
+
+        if total_supply == 0 {
+            return Err(PairError::InsufficientLiquidityBurned);
+        }
+
+        // Burn LP from caller (total_supply read before burn)
+        lp_client.burn(&to, &lp_amount);
+
+        let share_a = lp_amount
+            .checked_mul(state.reserve_a)
+            .ok_or(PairError::Overflow)?
+            .checked_div(total_supply)
+            .ok_or(PairError::Overflow)?;
+
+        let share_b = lp_amount
+            .checked_mul(state.reserve_b)
+            .ok_or(PairError::Overflow)?
+            .checked_div(total_supply)
+            .ok_or(PairError::Overflow)?;
+
+        if share_a <= 0 || share_b <= 0 {
+            return Err(PairError::InsufficientLiquidityBurned);
+        }
+
+        let (share_preferred, share_unwanted, reserve_preferred, reserve_unwanted) = if prefer_a {
+            (share_a, share_b, state.reserve_a, state.reserve_b)
+        } else {
+            (share_b, share_a, state.reserve_b, state.reserve_a)
+        };
+
+        // Post-burn reserves are the baseline for the internal swap
+        let reserve_preferred_post_burn = reserve_preferred
+            .checked_sub(share_preferred)
+            .ok_or(PairError::Overflow)?;
+        let reserve_unwanted_post_burn = reserve_unwanted
+            .checked_sub(share_unwanted)
+            .ok_or(PairError::Overflow)?;
+
+        let fee_bps = dynamic_fee::compute_fee_bps(&fee_state) as i128;
+        let fee_factor = 10_000i128 - fee_bps;
+
+        let amount_in_with_fee = share_unwanted
+            .checked_mul(fee_factor)
+            .ok_or(PairError::Overflow)?;
+
+        let swap_numerator = amount_in_with_fee
+            .checked_mul(reserve_preferred_post_burn)
+            .ok_or(PairError::Overflow)?;
+
+        let swap_denominator = reserve_unwanted_post_burn
+            .checked_mul(10_000)
+            .ok_or(PairError::Overflow)?
+            .checked_add(amount_in_with_fee)
+            .ok_or(PairError::Overflow)?;
+
+        if swap_denominator == 0 {
+            return Err(PairError::InsufficientLiquidity);
+        }
+
+        let swap_out = swap_numerator / swap_denominator;
+
+        let total_out = share_preferred
+            .checked_add(swap_out)
+            .ok_or(PairError::Overflow)?;
+
+        if total_out < min_amount_out {
+            return Err(PairError::SlippageExceeded);
+        }
+
+        // Final reserves: unwanted is net-unchanged (burned share re-enters as swap input)
+        let reserve_preferred_final = reserve_preferred_post_burn
+            .checked_sub(swap_out)
+            .ok_or(PairError::Overflow)?;
+        let reserve_unwanted_final = reserve_unwanted;
+
+        // K invariant check against post-burn baseline (swap leg must not violate K)
+        let k_before = reserve_preferred_post_burn
+            .checked_mul(reserve_unwanted_post_burn)
+            .ok_or(PairError::Overflow)?
+            .checked_mul(100_000_000)
+            .ok_or(PairError::Overflow)?;
+
+        let balance_preferred_adj = reserve_preferred_final
+            .checked_mul(10_000)
+            .ok_or(PairError::Overflow)?;
+
+        let balance_unwanted_adj = reserve_unwanted_final
+            .checked_mul(10_000)
+            .ok_or(PairError::Overflow)?
+            .checked_sub(
+                share_unwanted.checked_mul(fee_bps).ok_or(PairError::Overflow)?,
+            )
+            .ok_or(PairError::Overflow)?;
+
+        let k_after = balance_preferred_adj
+            .checked_mul(balance_unwanted_adj)
+            .ok_or(PairError::Overflow)?;
+
+        if k_after < k_before {
+            return Err(PairError::InvalidK);
+        }
+
+        let contract = env.current_contract_address();
+        TokenClient::new(&env, &preferred_token).transfer(&contract, &to, &total_out);
+
+        if prefer_a {
+            state.reserve_a = reserve_preferred_final;
+            state.reserve_b = reserve_unwanted_final;
+        } else {
+            state.reserve_a = reserve_unwanted_final;
+            state.reserve_b = reserve_preferred_final;
+        }
+
+        state.k_last = state
+            .reserve_a
+            .checked_mul(state.reserve_b)
+            .ok_or(PairError::Overflow)?;
+        state.block_timestamp_last = env.ledger().timestamp();
+
+        set_pair_state(&env, &state);
+
+        PairEvents::burn_single_side(&env, &to, lp_amount, &preferred_token, total_out);
+
+        Ok(total_out)
+    }
+
+    // ─────────────────────────────────────────
     // Swap
     // ─────────────────────────────────────────
 
@@ -231,6 +389,22 @@ impl Pair {
     ) -> Result<(), PairError> {
         let _guard = reentrancy::ReentrancyGuard::acquire(&env)?;
         Self::swap_inner(&env, amount_a_out, amount_b_out, &to)
+    }
+
+    // ─────────────────────────────────────────
+    // Flash loan
+    // ─────────────────────────────────────────
+
+    /// Borrows `amount_a` / `amount_b` from pool reserves, invokes `receiver.on_flash_loan`,
+    /// then verifies repayment (principal + fee) before returning.
+    pub fn flash_loan(
+        env: Env,
+        receiver: Address,
+        amount_a: i128,
+        amount_b: i128,
+        data: Bytes,
+    ) -> Result<(), PairError> {
+        flash_loan::execute_flash_loan(&env, &receiver, amount_a, amount_b, &data)
     }
 
     // ─────────────────────────────────────────
