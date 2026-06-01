@@ -20,7 +20,7 @@ use dynamic_fee::compute_fee_bps;
 use errors::PairError;
 use events::PairEvents;
 use math::MINIMUM_LIQUIDITY;
-use soroban_sdk::{contract, contractclient, contractimpl, token::TokenClient, Address, Env};
+use soroban_sdk::{contract, contractclient, contractimpl, token::TokenClient, Address, Bytes, Env};
 use storage::{
     get_fee_state, get_pair_state, set_fee_state, set_pair_state, set_reentrancy_guard, FeeState,
     ReentrancyGuard,
@@ -231,6 +231,22 @@ impl Pair {
     ) -> Result<(), PairError> {
         let _guard = reentrancy::ReentrancyGuard::acquire(&env)?;
         Self::swap_inner(&env, amount_a_out, amount_b_out, &to)
+    }
+
+    // ─────────────────────────────────────────
+    // Flash loan
+    // ─────────────────────────────────────────
+
+    /// Borrows `amount_a` / `amount_b` from pool reserves, invokes `receiver.on_flash_loan`,
+    /// then verifies repayment (principal + fee) before returning.
+    pub fn flash_loan(
+        env: Env,
+        receiver: Address,
+        amount_a: i128,
+        amount_b: i128,
+        data: Bytes,
+    ) -> Result<(), PairError> {
+        flash_loan::execute_flash_loan(&env, &receiver, amount_a, amount_b, &data)
     }
 
     // ─────────────────────────────────────────
