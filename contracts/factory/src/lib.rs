@@ -118,12 +118,7 @@ impl Factory {
         // 3. Initialize Pair — propagate any error; do NOT store if this fails
         let pair_client = PairClient::new(&env, &pair_address);
         let _ = pair_client
-            .try_initialize(
-                &env.current_contract_address(),
-                &token_0,
-                &token_1,
-                &lp_token_address,
-            )
+            .try_initialize(&env.current_contract_address(), &token_0, &token_1, &lp_token_address)
             .map_err(|_| FactoryError::NotInitialized)?;
 
         // 4. Store pair — only reached when initialize() succeeded
@@ -155,7 +150,7 @@ impl Factory {
         let pair_list = storage::get_pair_list(&env);
         let mut result = Vec::new(&env);
         let total = pair_list.len();
-        
+
         let start = offset;
         let end = (offset + limit).min(total);
         if start < total {
@@ -274,6 +269,61 @@ impl Factory {
         Ok(())
     }
 
+    /// Sets a per-pair fee override (issue #132).
+    ///
+    /// High-volume pairs (e.g. USDC/EURC) can be assigned a lower fee than the
+    /// protocol-wide default without redeploying the pool. The override is
+    /// read by the pair on the very next swap — no migration required.
+    ///
+    /// # Authorization
+    /// Caller must be the current `fee_to_setter` address.
+    ///
+    /// # Validation
+    /// `fee_bps` must be in `0..=100` (max 1%). Returns
+    /// `FactoryError::FeeTooHigh` otherwise. A value of `0` is allowed and
+    /// effectively clears the override on the next swap.
+    ///
+    /// # Event
+    /// Emits `PairFeeOverrideEvent { pair, old_fee_bps, new_fee_bps, ledger }`.
+    pub fn set_pair_fee(
+        env: Env,
+        setter: Address,
+        pair: Address,
+        fee_bps: u32,
+    ) -> Result<(), FactoryError> {
+        let storage = storage::get_factory_storage(&env).ok_or(FactoryError::NotInitialized)?;
+
+        setter.require_auth();
+
+        if setter != storage.fee_to_setter {
+            return Err(FactoryError::Unauthorized);
+        }
+
+        if fee_bps > 100 {
+            return Err(FactoryError::FeeTooHigh);
+        }
+
+        let old_fee_bps = storage::get_pair_fee_override(&env, &pair).unwrap_or(0);
+        storage::set_pair_fee_override(&env, &pair, fee_bps);
+
+        events::FactoryEvents::pair_fee_override_set(
+            &env,
+            &pair,
+            old_fee_bps,
+            fee_bps,
+            env.ledger().sequence(),
+        );
+
+        Ok(())
+    }
+
+    /// Returns the per-pair fee override in basis points, or `None` if no
+    /// override has been set. Pairs consult this on every swap to determine
+    /// their effective fee.
+    pub fn get_pair_fee_override(env: Env, pair: Address) -> Option<u32> {
+        storage::get_pair_fee_override(&env, &pair)
+    }
+
     pub fn fee_to(env: Env) -> Option<Address> {
         storage::get_factory_storage(&env).map(|s| s.fee_to).unwrap_or(None)
     }
@@ -305,10 +355,7 @@ impl Factory {
     }
 
     /// Cancels a pending upgrade. Gated by multisig.
-    pub fn cancel_upgrade(
-        env: Env,
-        signers: Vec<Address>,
-    ) -> Result<(), FactoryError> {
+    pub fn cancel_upgrade(env: Env, signers: Vec<Address>) -> Result<(), FactoryError> {
         let factory_storage =
             storage::get_factory_storage(&env).ok_or(FactoryError::NotInitialized)?;
         let threshold = (factory_storage.signers.len() + 1) / 2;

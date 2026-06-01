@@ -6,6 +6,7 @@ extern crate std;
 mod dynamic_fee;
 mod errors;
 mod events;
+mod factory_client;
 mod fee_decay;
 mod flash_loan;
 mod math;
@@ -19,6 +20,7 @@ mod test;
 use dynamic_fee::compute_fee_bps;
 use errors::PairError;
 use events::PairEvents;
+use factory_client::FactoryClient;
 use math::MINIMUM_LIQUIDITY;
 use soroban_sdk::{contract, contractclient, contractimpl, token::TokenClient, Address, Bytes, Env};
 use storage::{
@@ -418,7 +420,10 @@ impl Pair {
     }
 
     /// Consults the oracle for a TWAP over a given window.
-    pub fn consult_twap(env: Env, window_ledgers: u32) -> Result<(i128, i128), errors::OracleError> {
+    pub fn consult_twap(
+        env: Env,
+        window_ledgers: u32,
+    ) -> Result<(i128, i128), errors::OracleError> {
         oracle::consult_twap(&env, window_ledgers)
     }
 
@@ -482,9 +487,19 @@ impl Pair {
         let reserve_b_before = pair.reserve_b;
 
         dynamic_fee::decay_stale_ema(env, &mut fee_state);
-        let fee_bps = dynamic_fee::compute_fee_bps(&fee_state);
+        let dynamic_fee_bps = dynamic_fee::compute_fee_bps(&fee_state);
 
+        // Per-pair fee override (issue #132): if the factory has an override
+        // installed for this pair, it takes precedence over the dynamic fee.
+        // A failing or missing factory call must NOT revert the swap, so we
+        // fall back to the dynamic fee in that case.
         let contract_address = env.current_contract_address();
+        let fee_bps = match FactoryClient::new(env, &pair.factory)
+            .try_get_pair_fee_override(&contract_address)
+        {
+            Ok(Ok(Some(override_bps))) => override_bps,
+            _ => dynamic_fee_bps,
+        };
 
         if amount_a_out > 0 {
             TokenClient::new(env, &pair.token_a).transfer(&contract_address, to, &amount_a_out);
@@ -545,34 +560,36 @@ impl Pair {
         // price_after  = reserve_b / reserve_a (scaled)
         // price_delta  = |price_after - price_before| (scaled)
         const SCALE: i128 = 100_000_000_000_000; // 1e14, matches dynamic_fee::SCALE
-        
-        if reserve_a_before > 0 && reserve_b_before > 0 && pair.reserve_a > 0 && pair.reserve_b > 0 {
+
+        if reserve_a_before > 0 && reserve_b_before > 0 && pair.reserve_a > 0 && pair.reserve_b > 0
+        {
             // price_before = (reserve_b_before * SCALE) / reserve_a_before
             let price_before = reserve_b_before
                 .checked_mul(SCALE)
                 .and_then(|v| v.checked_div(reserve_a_before))
                 .unwrap_or(0);
-            
+
             // price_after = (reserve_b * SCALE) / reserve_a
-            let price_after = pair.reserve_b
+            let price_after = pair
+                .reserve_b
                 .checked_mul(SCALE)
                 .and_then(|v| v.checked_div(pair.reserve_a))
                 .unwrap_or(0);
-            
+
             // price_delta_abs = |price_after - price_before|
             let price_delta_abs = if price_after > price_before {
                 price_after - price_before
             } else {
                 price_before - price_after
             };
-            
+
             // trade_size = total input amount (in terms of reserve A equivalent)
             // For simplicity, use the larger of the two inputs
             let trade_size = amount_a_in.max(amount_b_in);
-            
+
             // total_reserve = reserve_a + reserve_b (simple sum for size weighting)
             let total_reserve = pair.reserve_a.saturating_add(pair.reserve_b);
-            
+
             // Update volatility (ignore errors to not break swaps on edge cases)
             let _ = dynamic_fee::update_volatility(
                 env,

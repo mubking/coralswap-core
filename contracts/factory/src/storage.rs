@@ -24,6 +24,9 @@ pub enum DataKey {
     Pair(Address, Address),
     PendingUpgrade,
     PairList,
+    /// Per-pair fee override (see `Factory::set_pair_fee`, issue #132).
+    /// Stored as `u32` basis points; absence means "use the pair's dynamic fee".
+    PairFeeOverride(Address),
 }
 
 pub fn get_pair_list(env: &Env) -> Vec<Address> {
@@ -73,6 +76,22 @@ pub fn set_pair(env: &Env, token_a: Address, token_b: Address, pair: Address) {
 
 pub fn has_factory_storage(env: &Env) -> bool {
     env.storage().instance().has(&DataKey::Factory)
+}
+
+// ---------------------------------------------------------------------------
+// Per-pair fee override (issue #132)
+// ---------------------------------------------------------------------------
+
+/// Returns the per-pair fee override in basis points, or `None` if no override
+/// has been set for `pair`.
+pub fn get_pair_fee_override(env: &Env, pair: &Address) -> Option<u32> {
+    env.storage().instance().get(&DataKey::PairFeeOverride(pair.clone()))
+}
+
+/// Stores the per-pair fee override in basis points. Callers are responsible
+/// for validating that `fee_bps <= 100` (enforced by `Factory::set_pair_fee`).
+pub fn set_pair_fee_override(env: &Env, pair: &Address, fee_bps: u32) {
+    env.storage().instance().set(&DataKey::PairFeeOverride(pair.clone()), &fee_bps);
 }
 
 /// Extend instance storage TTL to keep contract alive.

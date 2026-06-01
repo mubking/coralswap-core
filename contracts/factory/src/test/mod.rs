@@ -3,7 +3,7 @@ use soroban_sdk::Env;
 mod factory_tests {
     use super::*;
     use crate::{Factory, FactoryClient};
-    use soroban_sdk::{testutils::Address as _, Address, Bytes, Vec};
+    use soroban_sdk::{testutils::Address as _, testutils::Events, Address, Bytes, Vec};
     use std::fs;
     use std::path::PathBuf;
 
@@ -28,7 +28,8 @@ mod factory_tests {
 
     /// Helper: sets up a fresh Env, deploys the factory, initializes it with
     /// real pair / LP-token WASM hashes, and returns commonly-needed handles.
-    fn setup_env<'a>() -> (Env, FactoryClient<'a>, Address, Address, Address, Address, Vec<Address>) {
+    fn setup_env<'a>() -> (Env, FactoryClient<'a>, Address, Address, Address, Address, Vec<Address>)
+    {
         let env = Env::default();
         env.mock_all_auths();
 
@@ -50,12 +51,7 @@ mod factory_tests {
 
         let signers = Vec::from_array(&env, [signer_1.clone(), signer_2.clone(), signer_3.clone()]);
 
-        client.initialize(
-            &signers,
-            &pair_wasm_hash,
-            &lp_token_wasm_hash,
-            &fee_to_setter,
-        );
+        client.initialize(&signers, &pair_wasm_hash, &lp_token_wasm_hash, &fee_to_setter);
 
         let token_a = Address::generate(&env);
         let token_b = Address::generate(&env);
@@ -648,5 +644,122 @@ mod factory_tests {
         let result = client.try_set_fee_to(&fee_to_setter, &Some(fee_recipient.clone()), &20u32);
         assert!(result.is_ok(), "valid fee update must succeed");
         assert_eq!(client.fee_to(), Some(fee_recipient));
+    }
+
+    // ── Issue #132: set_pair_fee per-pair fee override ──────────────────────
+
+    /// Sets up a fresh factory WITHOUT uploading pair / lp_token WASM. The
+    /// pair-fee tests don't need real pair contracts — they only exercise
+    /// `set_pair_fee` / `get_pair_fee_override` which take an arbitrary
+    /// `Address` argument. This sidesteps the unrelated `reference-types`
+    /// host/contract incompatibility that breaks `load_wasm` in this
+    /// test environment.
+    fn setup_factory_for_pair_fee_tests<'a>() -> (Env, FactoryClient<'a>, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let factory_address = env.register_contract(None, Factory);
+        let client = FactoryClient::new(&env, &factory_address);
+
+        let fee_to_setter = Address::generate(&env);
+        let dummy_pair_wasm = env.deployer().upload_contract_wasm(Bytes::new(&env));
+        let dummy_lp_wasm = env.deployer().upload_contract_wasm(Bytes::new(&env));
+        let signers = Vec::from_array(
+            &env,
+            [Address::generate(&env), Address::generate(&env), Address::generate(&env)],
+        );
+        client.initialize(&signers, &dummy_pair_wasm, &dummy_lp_wasm, &fee_to_setter);
+
+        (env, client, fee_to_setter)
+    }
+
+    #[test]
+    fn test_set_pair_fee_admin_succeeds_and_is_readable() {
+        let (env, client, fee_to_setter) = setup_factory_for_pair_fee_tests();
+        let pair = Address::generate(&env);
+
+        // Initially no override is set.
+        assert_eq!(client.get_pair_fee_override(&pair), None);
+
+        // 5 bps is well within the 100 bps cap (issue example: USDC/EURC @ 5 bps).
+        client.set_pair_fee(&fee_to_setter, &pair, &5u32);
+
+        assert_eq!(client.get_pair_fee_override(&pair), Some(5u32));
+    }
+
+    #[test]
+    fn test_set_pair_fee_unauthorized_caller_reverts() {
+        let (env, client, _setter) = setup_factory_for_pair_fee_tests();
+        let pair = Address::generate(&env);
+        let rando = Address::generate(&env);
+
+        // Rando is not the registered fee_to_setter.
+        let result = client.try_set_pair_fee(&rando, &pair, &10u32);
+        assert!(result.is_err(), "non-admin must not be able to set the override");
+
+        // State must be untouched.
+        assert_eq!(client.get_pair_fee_override(&pair), None);
+    }
+
+    #[test]
+    fn test_set_pair_fee_above_cap_reverts_with_fee_too_high() {
+        let (env, client, fee_to_setter) = setup_factory_for_pair_fee_tests();
+        let pair = Address::generate(&env);
+
+        // 101 bps exceeds the 1% (100 bps) cap.
+        let result = client.try_set_pair_fee(&fee_to_setter, &pair, &101u32);
+        assert!(result.is_err(), "fee_bps > 100 must be rejected");
+
+        // Far above the cap must also be rejected.
+        let result_huge = client.try_set_pair_fee(&fee_to_setter, &pair, &10_000u32);
+        assert!(result_huge.is_err(), "fee_bps = 10000 must be rejected");
+
+        // And the override must not have been partially stored.
+        assert_eq!(client.get_pair_fee_override(&pair), None);
+    }
+
+    #[test]
+    fn test_set_pair_fee_boundary_values_are_accepted() {
+        let (env, client, fee_to_setter) = setup_factory_for_pair_fee_tests();
+
+        // fee_bps = 0 is allowed and stored verbatim (lets governance "clear"
+        // the override by setting it to zero).
+        let pair_zero = Address::generate(&env);
+        client.set_pair_fee(&fee_to_setter, &pair_zero, &0u32);
+        assert_eq!(client.get_pair_fee_override(&pair_zero), Some(0u32));
+
+        // fee_bps = 100 is the documented maximum.
+        let pair_max = Address::generate(&env);
+        client.set_pair_fee(&fee_to_setter, &pair_max, &100u32);
+        assert_eq!(client.get_pair_fee_override(&pair_max), Some(100u32));
+    }
+
+    #[test]
+    fn test_set_pair_fee_overwrites_previous_override() {
+        let (env, client, fee_to_setter) = setup_factory_for_pair_fee_tests();
+        let pair = Address::generate(&env);
+
+        // Install a 30 bps override, then lower it to 5 bps.
+        client.set_pair_fee(&fee_to_setter, &pair, &30u32);
+        assert_eq!(client.get_pair_fee_override(&pair), Some(30u32));
+
+        client.set_pair_fee(&fee_to_setter, &pair, &5u32);
+        assert_eq!(client.get_pair_fee_override(&pair), Some(5u32));
+
+        // And it must not bleed into other pairs.
+        let other_pair = Address::generate(&env);
+        assert_eq!(client.get_pair_fee_override(&other_pair), None);
+    }
+
+    #[test]
+    fn test_set_pair_fee_emits_pair_fee_override_event() {
+        let (env, client, fee_to_setter) = setup_factory_for_pair_fee_tests();
+        let pair = Address::generate(&env);
+
+        // Initial override: 0 (no override stored yet).
+        client.set_pair_fee(&fee_to_setter, &pair, &5u32);
+
+        let all = env.events().all();
+        assert_eq!(all.len(), 1, "set_pair_fee must emit exactly one event on success");
     }
 }
