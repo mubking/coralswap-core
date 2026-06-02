@@ -6,7 +6,7 @@ members = [
     "contracts/router",
     "contracts/flash_receiver_interface",
     "contracts/mock_flash_receiver",
-    "tests/fuzz"
+    "tests",
 ]
 resolver = "2"
 

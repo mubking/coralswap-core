@@ -17,3 +17,4 @@ mod integration_tests {
         let _env = Env::default();
     }
 }
+mod lifecycle;
